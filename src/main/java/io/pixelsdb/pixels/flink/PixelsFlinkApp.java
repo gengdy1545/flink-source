@@ -119,9 +119,11 @@ public class PixelsFlinkApp {
 
         TableIdentifier identifier = TableIdentifier.of(dbName, tblName);
         Table table = catalog.loadTable(identifier);
+        
+        org.apache.iceberg.flink.TableLoader tableLoader = org.apache.iceberg.flink.TableLoader.fromHadoopTable(table.location(), hadoopConf);
 
         FlinkSink.forRowData(stream)
-                .table(table)
+                .tableLoader(tableLoader)
                 .equalityFieldColumns(new ArrayList<>(table.schema().identifierFieldNames()))
                 .append();
     }
