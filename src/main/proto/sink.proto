@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+// Package name for the generated Java code
+package io.pixelsdb.pixels.sink.rpc;
+
+// Outer class name for the generated Java classes
+option java_outer_classname = "PixelsPollingServiceProto";
+
+// RPC service definition - Service name clearly reflects polling mode
+service PixelsPollingService {
+  // Define a simple request-response RPC for polling
+  // Flink Client calls once, Server responds once
+  rpc PollEvents(PollRequest) returns (PollResponse);
+}
+
+// Request sent by Flink Source
+message PollRequest {
+  // [Required] Specify which table to pull data from
+  string schema_name = 1;
+  string table_name = 2;
+}
+
+// Response returned by pixels-sink Server
+message PollResponse {
+  // Returns a list of CDC events. This list can be empty if there is no data currently.
+  repeated RowRecord events = 1;
+}
+
+message ColumnValue {
+  bytes value = 1;
+}
+
+message RowValue {
+  repeated ColumnValue values = 1;
+}
+
+enum OperationType {
+  INSERT = 0;
+  UPDATE = 1;
+  DELETE = 2;
+  SNAPSHOT = 3;
+}
+
+// Data passed to Flink Source
+message RowRecord {
+  RowValue before = 1;
+  RowValue after = 2;
+  SourceInfo source = 3;
+  OperationType op = 5;
+}
+
+message SourceInfo {
+  string db = 1;
+  string schema = 2;
+  string table = 3;
+}
