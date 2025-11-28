@@ -3,10 +3,7 @@ package io.pixelsdb.pixels.flink;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.types.logical.IntType;
-import org.apache.flink.table.types.logical.LogicalType;
-import org.apache.flink.table.types.logical.RowType;
-import org.apache.flink.table.types.logical.VarCharType;
+import org.apache.flink.table.types.logical.*;
 
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
@@ -25,13 +22,9 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.hadoop.conf.Configuration;
 
 import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 
 public class PixelsFlinkApp {
-
     public static void main(String[] args) throws Exception {
         // 1. Load Properties
         Properties props = new Properties();
@@ -56,11 +49,7 @@ public class PixelsFlinkApp {
     }
 
     public static void buildJob(StreamExecutionEnvironment env, Properties props) {
-        // Define Schema (Hardcoded for demo)
-        RowType rowType = RowType.of(
-                new LogicalType[]{new IntType(), new VarCharType()},
-                new String[]{"id", "data"}
-        );
+        RowType rowType = parseSchema(props.getProperty("source.schema"));
 
         // Create Source
         PixelsRpcSource source = new PixelsRpcSource(props, rowType);
@@ -91,24 +80,6 @@ public class PixelsFlinkApp {
         Options options = new Options();
         options.set("warehouse", warehouse);
 
-        // Configure S3 if properties exist
-        if (props.containsKey("s3.access-key")) {
-            options.set("s3.access-key", props.getProperty("s3.access-key"));
-        }
-        if (props.containsKey("s3.secret-key")) {
-            options.set("s3.secret-key", props.getProperty("s3.secret-key"));
-        }
-        if (props.containsKey("s3.endpoint")) {
-            options.set("s3.endpoint", props.getProperty("s3.endpoint"));
-        }
-        if (props.containsKey("s3.path.style.access")) {
-            options.set("s3.path.style.access", props.getProperty("s3.path.style.access"));
-        }
-        
-        // Enable S3 support
-        options.set("hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
-        options.set("hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
-
         try {
             org.apache.paimon.catalog.Catalog catalog = CatalogFactory.createCatalog(CatalogContext.create(options));
             org.apache.paimon.table.Table table = catalog.getTable(Identifier.create(dbName, tblName));
@@ -123,7 +94,7 @@ public class PixelsFlinkApp {
     }
 
     private static void configureIcebergSink(DataStream<RowData> stream, Properties props) {
-        String catalogType = props.getProperty("iceberg.catalog.type", "hadoop");
+        String catalogType = props.getProperty("iceberg.catalog.type", "glue");
         String warehouse = props.getProperty("iceberg.catalog.warehouse");
         String tableNameStr = props.getProperty("iceberg.table.name");
         
@@ -136,82 +107,76 @@ public class PixelsFlinkApp {
             tblName = parts[1];
         }
 
-        // Initialize Configuration
-        Configuration hadoopConf = new Configuration();
-        
-        // Configure S3 if properties exist (for non-AWS S3 like MinIO)
-        if (props.containsKey("s3.access-key")) {
-            hadoopConf.set("fs.s3a.access.key", props.getProperty("s3.access-key"));
-        }
-        if (props.containsKey("s3.secret-key")) {
-            hadoopConf.set("fs.s3a.secret.key", props.getProperty("s3.secret-key"));
-        }
-        if (props.containsKey("s3.endpoint")) {
-            hadoopConf.set("fs.s3a.endpoint", props.getProperty("s3.endpoint"));
-        }
-        if (props.containsKey("s3.path.style.access")) {
-            hadoopConf.set("fs.s3a.path.style.access", props.getProperty("s3.path.style.access"));
-        }
-
-        // Enable S3 support
-        hadoopConf.set("fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
-        hadoopConf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
-
-        CatalogLoader catalogLoader;
         Map<String, String> catalogProps = new HashMap<>();
         catalogProps.put("warehouse", warehouse);
+
+        catalogProps.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
+
+        CatalogLoader catalogLoader;
+        Configuration hadoopConf = new Configuration();
 
         if ("glue".equalsIgnoreCase(catalogType)) {
             // AWS Glue Catalog - credentials auto-discovered from ~/.aws/credentials
             catalogProps.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
-            catalogProps.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
-            
-            // Optional: Specify AWS region if not in ~/.aws/config
-            if (props.containsKey("iceberg.catalog.glue.region")) {
-                catalogProps.put("glue.region", props.getProperty("iceberg.catalog.glue.region"));
-            }
             
             catalogLoader = CatalogLoader.custom("glue_catalog", catalogProps, hadoopConf, 
                 "org.apache.iceberg.aws.glue.GlueCatalog");
-        } else if ("rest".equalsIgnoreCase(catalogType)) {
-            String uri = props.getProperty("iceberg.catalog.uri");
-            String credential = props.getProperty("iceberg.catalog.credential");
-            
-            catalogProps.put("uri", uri);
-            catalogProps.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
-            if (credential != null) {
-                catalogProps.put("credential", credential);
-            }
-            
-            // Pass S3 properties to Catalog properties (needed for S3FileIO)
-            if (props.containsKey("s3.endpoint")) {
-                catalogProps.put("s3.endpoint", props.getProperty("s3.endpoint"));
-            }
-            if (props.containsKey("s3.access-key")) {
-                catalogProps.put("s3.access-key-id", props.getProperty("s3.access-key"));
-            }
-            if (props.containsKey("s3.secret-key")) {
-                catalogProps.put("s3.secret-access-key", props.getProperty("s3.secret-key"));
-            }
-            if (props.containsKey("s3.path.style.access")) {
-                catalogProps.put("s3.path-style-access", props.getProperty("s3.path.style.access"));
-            }
-
-            catalogLoader = CatalogLoader.custom("rest_catalog", catalogProps, hadoopConf, "org.apache.iceberg.rest.RESTCatalog");
         } else {
-            // Hadoop Catalog (can still work with S3)
-            catalogLoader = CatalogLoader.hadoop("hadoop_catalog", hadoopConf, catalogProps);
+            throw new RuntimeException("Unsupported catalog type.");
         }
 
         Catalog catalog = catalogLoader.loadCatalog();
         TableIdentifier identifier = TableIdentifier.of(dbName, tblName);
-        Table table = catalog.loadTable(identifier);
-        
         TableLoader tableLoader = TableLoader.fromCatalog(catalogLoader, identifier);
 
         FlinkSink.forRowData(stream)
                 .tableLoader(tableLoader)
-                .equalityFieldColumns(new ArrayList<>(table.schema().identifierFieldNames()))
                 .append();
+    }
+
+    private static RowType parseSchema(String schemaStr) {
+        String[] columns = schemaStr.split(",");
+        List<String> names = new ArrayList<>();
+        List<LogicalType> types = new ArrayList<>();
+
+        for (String col : columns) {
+            String[] parts = col.trim().split(":");
+            if (parts.length != 2) {
+                throw new IllegalArgumentException("Invalid schema format. Expected 'name:type', got: " + col);
+            }
+            String name = parts[0].trim();
+            String typeStr = parts[1].trim().toUpperCase();
+
+            names.add(name);
+            types.add(mapType(typeStr));
+        }
+
+        return RowType.of(
+                types.toArray(new LogicalType[0]),
+                names.toArray(new String[0])
+        );
+    }
+
+    private static LogicalType mapType(String typeStr) {
+        switch (typeStr) {
+            case "INT":
+            case "INTEGER":
+                return new IntType();
+            case "STRING":
+            case "VARCHAR":
+                return new VarCharType();
+            case "BIGINT":
+            case "LONG":
+                return new BigIntType();
+            case "FLOAT":
+                return new FloatType();
+            case "DOUBLE":
+                return new DoubleType();
+            case "BOOLEAN":
+            case "BOOL":
+                return new BooleanType();
+            default:
+                throw new UnsupportedOperationException("Unsupported type in config: " + typeStr);
+        }
     }
 }
